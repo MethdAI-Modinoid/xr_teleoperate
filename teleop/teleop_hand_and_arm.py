@@ -118,14 +118,14 @@ if __name__ == '__main__':
             }
         else:
             img_config = {
-                'fps': 30,
-                'head_camera_type': 'opencv',
-                'head_camera_image_shape': [480, 1280],  # Head camera resolution
-                'head_camera_id_numbers': [0],
-                'wrist_camera_type': 'opencv',
-                'wrist_camera_image_shape': [480, 640],  # Wrist camera resolution
-                'wrist_camera_id_numbers': [2, 4],
-            }
+            'fps':30,                                                          # frame per second
+            'head_camera_type': 'opencv',                                     # opencv or realsense
+            'head_camera_image_shape': [480, 640],                           # Head camera resolution  [height, width]
+            'head_camera_id_numbers': [0],                                    # '/dev/video0' (opencv)
+            #'wrist_camera_type': 'realsense', 
+            #'wrist_camera_image_shape': [480, 640],                           # Wrist camera resolution  [height, width]
+            #'wrist_camera_id_numbers': ["218622271789", "241222076627"],      # serial number (realsense)
+        }
 
 
         ASPECT_RATIO_THRESHOLD = 2.0 # If the aspect ratio exceeds this value, it is considered binocular
