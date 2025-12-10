@@ -26,12 +26,23 @@ from teleop.utils.ipc import IPC_Server
 from sshkeyboard import listen_keyboard, stop_listening
 
 # for simulation
-from unitree_sdk2py.core.channel import ChannelPublisher
+from unitree_sdk2py.core.channel import ChannelPublisher, ChannelSubscriber, ChannelFactoryInitialize
 from unitree_sdk2py.idl.std_msgs.msg.dds_ import String_
+from unitree_sdk2py.idl.geometry_msgs.msg.dds_ import Vector3_
+import cyclonedds.idl.types as types
+
+ChannelFactoryInitialize()
+
+pub = ChannelPublisher("pinch_val", Vector3_)
+pub.Init()
+
 def publish_reset_category(category: int,publisher): # Scene Reset signal
     msg = String_(data=str(category))
     publisher.Write(msg)
     logger_mp.info(f"published reset category: {category}")
+
+
+
 
 # state transition
 START          = False  # Enable to start robot following VR user motion  
@@ -109,23 +120,23 @@ if __name__ == '__main__':
         if args.sim:
             img_config = {
                 'fps': 30,
-                'head_camera_type': 'opencv',
+                'head_camera_type': 'realsense',
                 'head_camera_image_shape': [480, 640],  # Head camera resolution
-                'head_camera_id_numbers': [0],
-                'wrist_camera_type': 'opencv',
-                'wrist_camera_image_shape': [480, 640],  # Wrist camera resolution
-                'wrist_camera_id_numbers': [2, 4],
+                'head_camera_id_numbers': ['344522071502'],
+                # 'wrist_camera_type': 'opencv',
+                # 'wrist_camera_image_shape': [480, 640],  # Wrist camera resolution
+                # 'wrist_camera_id_numbers': [2, 4],
             }
         else:
             img_config = {
-            'fps':30,                                                          # frame per second
-            'head_camera_type': 'opencv',                                     # opencv or realsense
-            'head_camera_image_shape': [480, 640],                           # Head camera resolution  [height, width]
-            'head_camera_id_numbers': [0],                                    # '/dev/video0' (opencv)
-            #'wrist_camera_type': 'realsense', 
-            #'wrist_camera_image_shape': [480, 640],                           # Wrist camera resolution  [height, width]
-            #'wrist_camera_id_numbers': ["218622271789", "241222076627"],      # serial number (realsense)
-        }
+                'fps': 30,
+                'head_camera_type': 'realsense',
+                'head_camera_image_shape': [480, 640],  # Head camera resolution
+                'head_camera_id_numbers': ['344522071502'],
+                # 'wrist_camera_type': 'opencv',
+                # 'wrist_camera_image_shape': [480, 640],  # Wrist camera resolution
+                # 'wrist_camera_id_numbers': [2, 4],
+            }
 
 
         ASPECT_RATIO_THRESHOLD = 2.0 # If the aspect ratio exceeds this value, it is considered binocular
@@ -168,6 +179,15 @@ if __name__ == '__main__':
         # television: obtain hand pose data from the XR device and transmit the robot's head camera image to the XR device.
         tv_wrapper = TeleVuerWrapper(binocular=BINOCULAR, use_hand_tracking=args.xr_mode == "hand", img_shape=tv_img_shape, img_shm_name=tv_img_shm.name, 
                                     return_state_data=True, return_hand_rot_data = False)
+        
+        telep_data = tv_wrapper.get_motion_state_data()
+
+        
+        val = telep_data.left_pinch_value
+
+        msg = Vector3_(x=types.float64(val), y=types.float64(0.0), z=types.float64(0.0))
+        
+
 
         # arm
         if args.arm == "G1_29":
@@ -189,7 +209,7 @@ if __name__ == '__main__':
             right_hand_pos_array = Array('d', 75, lock = True)     # [input]
             dual_hand_data_lock = Lock()
             dual_hand_state_array = Array('d', 14, lock = False)   # [output] current left, right hand state(14) data.
-            dual_hand_action_array = Array('d', 14, lock = False)  # [output] current left, right hand action(14) data.
+            dual_hand_action_array = Array('d', 14, lock = False)
             hand_ctrl = Dex3_1_Controller(left_hand_pos_array, right_hand_pos_array, dual_hand_data_lock, dual_hand_state_array, dual_hand_action_array, simulation_mode=args.sim)
         elif args.ee == "dex1":
             left_gripper_value = Value('d', 0.0, lock=True)        # [input]
@@ -203,7 +223,7 @@ if __name__ == '__main__':
             right_hand_pos_array = Array('d', 75, lock = True)     # [input]
             dual_hand_data_lock = Lock()
             dual_hand_state_array = Array('d', 12, lock = False)   # [output] current left, right hand state(12) data.
-            dual_hand_action_array = Array('d', 12, lock = False)  # [output] current left, right hand action(12) data.
+            dual_hand_action_array = Array('d', 12, lock = False)
             hand_ctrl = Inspire_Controller(left_hand_pos_array, right_hand_pos_array, dual_hand_data_lock, dual_hand_state_array, dual_hand_action_array, simulation_mode=args.sim)
         elif args.ee == "brainco":
             left_hand_pos_array = Array('d', 75, lock = True)      # [input]
@@ -293,6 +313,16 @@ if __name__ == '__main__':
                         publish_reset_category(1, reset_pose_publisher)
             # get input data
             tele_data = tv_wrapper.get_motion_state_data()
+            val = tele_data.left_pinch_value
+            val2 = tele_data.right_pinch_value
+            msg = Vector3_(x=types.float64(val), y=types.float64(val2), z=types.float64(0.0))
+
+            if pub.Write(msg, 0.5):
+                # print("publish success. msg:r")
+                pass
+            else:
+                print("publish error.")
+
             if (args.ee == "dex3" or args.ee == "inspire1" or args.ee == "brainco") and args.xr_mode == "hand":
                 with left_hand_pos_array.get_lock():
                     left_hand_pos_array[:] = tele_data.left_hand_pos.flatten()
@@ -310,6 +340,8 @@ if __name__ == '__main__':
                     right_gripper_value.value = tele_data.right_pinch_value
             else:
                 pass        
+
+###### try controller mode and squeeze valye NO TRY 
             
             # high level control
             if args.xr_mode == "controller" and args.motion:
@@ -387,10 +419,15 @@ if __name__ == '__main__':
                 if WRIST:
                     current_wrist_image = wrist_img_array.copy()
                 # arm state and action
+                left_ee_action = left_hand_action
                 left_arm_state  = current_lr_arm_q[:7]
                 right_arm_state = current_lr_arm_q[-7:]
                 left_arm_action = sol_q[:7]
                 right_arm_action = sol_q[-7:]
+
+
+
+
                 if RECORD_RUNNING:
                     colors = {}
                     depths = {}
@@ -405,6 +442,7 @@ if __name__ == '__main__':
                         if WRIST:
                             colors[f"color_{1}"] = current_wrist_image[:, :wrist_img_shape[1]//2]
                             colors[f"color_{2}"] = current_wrist_image[:, wrist_img_shape[1]//2:]
+
                     states = {
                         "left_arm": {                                                                    
                             "qpos":   left_arm_state.tolist(),    # numpy.array -> list

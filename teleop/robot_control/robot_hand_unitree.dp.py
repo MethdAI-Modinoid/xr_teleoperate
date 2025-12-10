@@ -6,10 +6,6 @@ from unitree_sdk2py.idl.default import unitree_hg_msg_dds__HandCmd_
 from unitree_sdk2py.core.channel import ChannelPublisher, ChannelSubscriber, ChannelFactoryInitialize # dds
 from unitree_sdk2py.idl.unitree_go.msg.dds_ import MotorCmds_, MotorStates_                           # idl
 from unitree_sdk2py.idl.default import unitree_go_msg_dds__MotorCmd_
-from unitree_sdk2py.idl.geometry_msgs.msg.dds_ import Vector3_
-
-from multiprocessing import Value
-
 
 import numpy as np
 from enum import IntEnum
@@ -17,7 +13,6 @@ import time
 import os
 import sys
 import threading
-from televuer import TeleVuerWrapper
 from multiprocessing import Process, shared_memory, Array, Value, Lock
 
 parent2_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -34,14 +29,11 @@ kTopicDex3LeftCommand = "rt/dex3/left/cmd"
 kTopicDex3RightCommand = "rt/dex3/right/cmd"
 kTopicDex3LeftState = "rt/dex3/left/state"
 kTopicDex3RightState = "rt/dex3/right/state"
-mapped_right = 0.0
-mapped_left = 0.0
 
 
 class Dex3_1_Controller:
     def __init__(self, left_hand_array_in, right_hand_array_in, dual_hand_data_lock = None, dual_hand_state_array_out = None,
                        dual_hand_action_array_out = None, fps = 100.0, Unit_Test = False, simulation_mode = False):
-
         """
         [note] A *_array type parameter requires using a multiprocessing Array, because it needs to be passed to the internal child process
 
@@ -66,12 +58,6 @@ class Dex3_1_Controller:
         self.fps = fps
         self.Unit_Test = Unit_Test
         self.simulation_mode = simulation_mode
-        self.mapped_left = 0.0
-        self.mapped_right = 0.0
-
-        self.mapped_left_sh = Value('d', 0.0, lock=True)
-        self.mapped_right_sh = Value('d', 0.0, lock=True)
-
         if not self.Unit_Test:
             self.hand_retargeting = HandRetargeting(HandType.UNITREE_DEX3)
         else:
@@ -83,8 +69,6 @@ class Dex3_1_Controller:
             ChannelFactoryInitialize(0)
 
         # initialize handcmd publisher and handstate subscriber
-        self.sub = ChannelSubscriber("pinch_val", Vector3_)
-        self.sub.Init(self.LowStateHandler, 10)
         self.LeftHandCmb_publisher = ChannelPublisher(kTopicDex3LeftCommand, HandCmd_)
         self.LeftHandCmb_publisher.Init()
         self.RightHandCmb_publisher = ChannelPublisher(kTopicDex3RightCommand, HandCmd_)
@@ -104,6 +88,9 @@ class Dex3_1_Controller:
         self.subscribe_state_thread.daemon = True
         self.subscribe_state_thread.start()
 
+        self.sub = ChannelSubscriber("pinch_val", Vector3_)
+        self.sub.Init(self.LowStateHandler, 10)
+
         while True:
             if any(self.left_hand_state_array) and any(self.right_hand_state_array):
                 break
@@ -112,52 +99,16 @@ class Dex3_1_Controller:
         logger_mp.info("[Dex3_1_Controller] Subscribe dds ok.")
 
         hand_control_process = Process(target=self.control_process, args=(left_hand_array_in, right_hand_array_in,  self.left_hand_state_array, self.right_hand_state_array,
-                                                                          dual_hand_data_lock, dual_hand_state_array_out, dual_hand_action_array_out, self.mapped_left_sh, self.mapped_right_sh))
+                                                                          dual_hand_data_lock, dual_hand_state_array_out, dual_hand_action_array_out))
         hand_control_process.daemon = True
         hand_control_process.start()
 
         logger_mp.info("Initialize Dex3_1_Controller OK!\n")
 
-
-
-        #left max = -0.55
-        #left min = 0.95
-
-    def map_value(self, x, x_min, x_max, y_min, y_max):
-        # constrain input to range
-        if x < x_min: x = x_min
-        if x > x_max: x = x_max
-        
-        # perform linear mapping``
-        return y_min + (x - x_min) * (y_max - y_min) / (x_max - x_min)
-
-
-    def LowStateHandler(self, msg):
-
-        # print("INNA PINCH HOGIYA SONIYEEEE", msg)
-
-        # print(msg.x)
-
-        mapped_left = self.map_value(msg.x, 4.9, 12.5, 2.0, -0.30)
-        mapped_right = self.map_value(msg.y, 2.5, 14.5, -0.95, 0.55)
-
-        # print("left mapped", mapped_left)
-
-        with self.mapped_left_sh.get_lock():
-            self.mapped_left_sh.value = mapped_left
-        with self.mapped_right_sh.get_lock():
-            self.mapped_right_sh.value = mapped_right
-
-
-        #right max = 0.55
-        #right min = -0.95
-
     def _subscribe_hand_state(self):
         while True:
             left_hand_msg  = self.LeftHandState_subscriber.Read()
             right_hand_msg = self.RightHandState_subscriber.Read()
-            # pinch_val_msg = self.sub.Read()
-
             if left_hand_msg is not None and right_hand_msg is not None:
                 # Update left hand state
                 for idx, id in enumerate(Dex3_1_Left_JointIndex):
@@ -182,27 +133,17 @@ class Dex3_1_Controller:
 
     def ctrl_dual_hand(self, left_q_target, right_q_target):
         """set current left, right hand motor state target q"""
-
-        print(self.left_msg.motor_cmd[1].q)
         for idx, id in enumerate(Dex3_1_Left_JointIndex):
             self.left_msg.motor_cmd[id].q = left_q_target[idx]
         for idx, id in enumerate(Dex3_1_Right_JointIndex):
             self.right_msg.motor_cmd[id].q = right_q_target[idx]
-        
-        ##fixing the motor rotation
-        self.left_msg.motor_cmd[0].q = 0.017345  # set cmd timestamp
-        self.right_msg.motor_cmd[0].q = 0.017345  # set cmd timestamp
-        ########
-
-        # self.left_msg.motor_cmd[1].q = self.mapped_left
-        # self.right_msg.motor_cmd[1].q = self.mapped_right
 
         self.LeftHandCmb_publisher.Write(self.left_msg)
         self.RightHandCmb_publisher.Write(self.right_msg)
         # logger_mp.debug("hand ctrl publish ok.")
     
     def control_process(self, left_hand_array_in, right_hand_array_in, left_hand_state_array, right_hand_state_array,
-                              dual_hand_data_lock = None, dual_hand_state_array_out = None, dual_hand_action_array_out = None, mapped_left_sh = None, mapped_right_sh = None):
+                              dual_hand_data_lock = None, dual_hand_state_array_out = None, dual_hand_action_array_out = None):
         self.running = True
 
         left_q_target  = np.full(Dex3_Num_Motors, 0)
@@ -246,23 +187,6 @@ class Dex3_1_Controller:
                     left_hand_data  = np.array(left_hand_array_in[:]).reshape(25, 3).copy()
                 with right_hand_array_in.get_lock():
                     right_hand_data = np.array(right_hand_array_in[:]).reshape(25, 3).copy()
-
-                # print("value to ye hai", mapped_left_sh.value)
-
-                if mapped_left_sh is not None and mapped_right_sh is not None:
-                    with mapped_left_sh.get_lock():
-                        mapped_left = mapped_left_sh.value
-                    with mapped_right_sh.get_lock():
-                        mapped_right = mapped_right_sh.value
-                else:
-
-                    mapped_left = self.mapped_left
-                    mapped_right = self.mapped_right
-
-                # if you want to publish these on motor_cmd[1], uncomment and use mapped_left/right
-                # print(mapped_left)
-                self.left_msg.motor_cmd[1].q  = mapped_left
-                self.right_msg.motor_cmd[1].q = mapped_right
 
                 # Read left and right q_state from shared arrays
                 state_data = np.concatenate((np.array(left_hand_state_array[:]), np.array(right_hand_state_array[:])))

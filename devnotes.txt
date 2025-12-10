@@ -1,6 +1,0 @@
-python unitree_lerobot/utils/sort_and_rename_folders.py \
-        --data_dir /mnt/drive2/humanoid_ws/src/xr_teleoperate/teleop/utils/data/pick_cube
-
-python unitree_lerobot/utils/convert_unitree_json_to_lerobot.py \
-    --raw-dir /mnt/drive2/humanoid_ws/src/xr_teleoperate/teleop/utils/data/pick_cube \
-    --robot_type Unitree_G1_Dex3
