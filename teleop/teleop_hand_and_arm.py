@@ -3,8 +3,8 @@ import argparse
 from multiprocessing import Value, Array, Lock
 import threading
 import logging_mp
-logging_mp.basic_config(level=logging_mp.INFO)
-logger_mp = logging_mp.get_logger(__name__)
+logging_mp.basicConfig(level=logging_mp.INFO)
+logger_mp = logging_mp.getLogger(__name__)
 
 import os 
 import sys
@@ -12,20 +12,21 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
 sys.path.append(parent_dir)
 
-from unitree_sdk2py.core.channel import ChannelFactoryInitialize # dds 
 from televuer import TeleVuerWrapper
-from teleop.robot_control.robot_arm import G1_29_ArmController, G1_23_ArmController, H1_2_ArmController, H1_ArmController
-from teleop.robot_control.robot_arm_ik import G1_29_ArmIK, G1_23_ArmIK, H1_2_ArmIK, H1_ArmIK
+from teleop.robot_control.robot_arm_ik import G1_29_ArmIK, G1_23_ArmIK, H1_2_ArmIK, H1_ArmIK, H2_ArmIK
 from teleimager.image_client import ImageClient
 from teleop.utils.episode_writer import EpisodeWriter
 from teleop.utils.ipc import IPC_Server
-from teleop.utils.motion_switcher import MotionSwitcher, LocoClientWrapper
 from sshkeyboard import listen_keyboard, stop_listening
 
-# for simulation
-from unitree_sdk2py.core.channel import ChannelPublisher
-from unitree_sdk2py.idl.std_msgs.msg.dds_ import String_
+# NOTE: everything that imports `unitree_sdk2py` is imported LAZILY, inside the branch that
+# needs it, rather than at module scope. That is what lets a `--no-robot` recording station
+# run without the Unitree SDK installed at all -- the headset-only path needs televuer, the
+# IK (pinocchio/casadi), dex-retargeting and teleimager, none of which touch DDS. See
+# ../../XR_SWAP_PLAN.md work item A.
+
 def publish_reset_category(category: int, publisher): # Scene Reset signal
+    from unitree_sdk2py.idl.std_msgs.msg.dds_ import String_
     msg = String_(data=str(category))
     publisher.Write(msg)
     logger_mp.info(f"published reset category: {category}")
@@ -76,14 +77,21 @@ if __name__ == '__main__':
     parser.add_argument('--frequency', type = float, default = 30.0, help = 'control and record \'s frequency')
     parser.add_argument('--input-mode', type=str, choices=['hand', 'controller'], default='hand', help='Select XR device input tracking source')
     parser.add_argument('--display-mode', type=str, choices=['immersive', 'ego', 'pass-through'], default='immersive', help='Select XR device display mode')
-    parser.add_argument('--arm', type=str, choices=['G1_29', 'G1_23', 'H1_2', 'H1'], default='G1_29', help='Select arm controller')
+    parser.add_argument('--arm', type=str, choices=['G1_29', 'G1_23', 'H1_2', 'H1', 'H2'], default='G1_29', help='Select arm controller')
     parser.add_argument('--ee', type=str, choices=['dex1', 'dex3', 'inspire_ftp', 'inspire_dfx', 'brainco'], help='Select end effector controller')
-    parser.add_argument('--img-server-ip', type=str, default='192.168.123.164', help='IP address of image server, used by teleimager and televuer')
+    # network parameters
+    parser.add_argument('--img-server-ip', type=str, default='192.168.123.153', help='IP address of image server, used by teleimager and televuer')
     parser.add_argument('--network-interface', type=str, default=None, help='Network interface for dds communication, e.g., eth0, wlan0. If None, use default interface.')
     # mode flags
     parser.add_argument('--motion', action = 'store_true', help = 'Enable motion control mode')
     parser.add_argument('--headless', action='store_true', help='Enable headless mode (no display)')
     parser.add_argument('--sim', action = 'store_true', help = 'Enable isaac simulation mode')
+    parser.add_argument('--no-robot', action = 'store_true',
+                        help = 'Headset-only mode: no robot, no simulator, no DDS. Arm and hand state are '
+                               'kept in memory by the virtual controllers, so a Meta headset plus a PC can '
+                               'record episodes on its own. XR tracking, IK and hand retargeting are '
+                               'unchanged, so recorded `actions` are identical to what a real robot would '
+                               'have been commanded.')
     parser.add_argument('--ipc', action = 'store_true', help = 'Enable IPC server to handle input; otherwise enable sshkeyboard')
     parser.add_argument('--affinity', action = 'store_true', help = 'Enable high priority and set CPU affinity mode')
     # record mode and task info
@@ -95,14 +103,22 @@ if __name__ == '__main__':
     parser.add_argument('--task-steps', type = str, default = 'step1: do this; step2: do that;', help = 'task steps for recording at json file')
 
     args = parser.parse_args()
-    logger_mp.info(f"args: {args}")
+    logger_mp.debug(f"args: {args}")
 
     try:
+        if args.no_robot and args.sim:
+            raise ValueError("--no-robot and --sim are mutually exclusive: --sim talks to a simulated "
+                             "robot over DDS, --no-robot talks to nothing at all.")
+
         # setup dds communication domains id
-        if args.sim:
-            ChannelFactoryInitialize(1, networkInterface=args.network_interface)
+        if args.no_robot:
+            logger_mp.info("🎧 --no-robot: skipping DDS init; using virtual arm/hand controllers.")
         else:
-            ChannelFactoryInitialize(0, networkInterface=args.network_interface)
+            from unitree_sdk2py.core.channel import ChannelFactoryInitialize # dds
+            if args.sim:
+                ChannelFactoryInitialize(1, networkInterface=args.network_interface)
+            else:
+                ChannelFactoryInitialize(0, networkInterface=args.network_interface)
 
         # ipc communication mode. client usage: see utils/ipc.py
         if args.ipc:
@@ -116,57 +132,87 @@ if __name__ == '__main__':
             listen_keyboard_thread.start()
 
         # image client
-        img_client = ImageClient(host=args.img_server_ip)
+        img_client = ImageClient(host=args.img_server_ip, request_bgr=True)
         camera_config = img_client.get_cam_config()
         logger_mp.debug(f"Camera config: {camera_config}")
-        xr_need_local_img = not (args.display_mode == 'pass-through' or camera_config['head_camera']['enable_webrtc'])
+        xr_need_local_img = not (args.display_mode == 'pass-through' or camera_config['camera']['head_camera']['enable_webrtc'])
 
         # televuer_wrapper: obtain hand pose data from the XR device and transmit the robot's head camera image to the XR device.
         tv_wrapper = TeleVuerWrapper(use_hand_tracking=args.input_mode == "hand", 
-                                     binocular=camera_config['head_camera']['binocular'],
-                                     img_shape=camera_config['head_camera']['image_shape'],
+                                     binocular=camera_config['camera']['head_camera']['binocular'],
+                                     img_shape=camera_config['camera']['head_camera']['image_shape'],
                                      # maybe should decrease fps for better performance?
                                      # https://github.com/unitreerobotics/xr_teleoperate/issues/172
                                      # display_fps=camera_config['head_camera']['fps'] ? args.frequency? 30.0?
                                      display_mode=args.display_mode,
-                                     zmq=camera_config['head_camera']['enable_zmq'],
-                                     webrtc=camera_config['head_camera']['enable_webrtc'],
-                                     webrtc_url=f"https://{args.img_server_ip}:{camera_config['head_camera']['webrtc_port']}/offer",
+                                     zmq=camera_config['camera']['head_camera']['enable_zmq'],
+                                     webrtc=camera_config['camera']['head_camera']['enable_webrtc'],
+                                     webrtc_url=f"https://{args.img_server_ip}:{camera_config['camera']['head_camera']['webrtc_port']}/offer",
+                                     arm_reference_mode="head_yaw"
                                      )
         
         # motion mode (G1: Regular mode R1+X, not Running mode R2+A)
-        if args.motion:
+        # Both branches below talk DDS to a real robot, so both are skipped with --no-robot.
+        if args.no_robot:
+            pass
+        elif args.motion:
             if args.input_mode == "controller":
+                from teleop.utils.motion_switcher import LocoClientWrapper
                 loco_wrapper = LocoClientWrapper()
         else:
+            from teleop.utils.motion_switcher import MotionSwitcher
             motion_switcher = MotionSwitcher()
             status, result = motion_switcher.Enter_Debug_Mode()
             logger_mp.info(f"Enter debug mode: {'Success' if status == 0 else 'Failed'}")
 
         # arm
-        if args.arm == "G1_29":
+        if args.no_robot:
+            # The IK is robot-independent -- it solves against the URDF, not the hardware --
+            # so only the CONTROLLER is swapped out here.
+            if args.arm != "G1_29":
+                raise ValueError(f"--no-robot currently supports --arm G1_29 only, got {args.arm}. "
+                                 f"Add a virtual controller for that arm to enable it.")
+            from teleop.robot_control.robot_arm_virtual import G1_29_VirtualArmController
+            arm_ik = G1_29_ArmIK()
+            arm_ctrl = G1_29_VirtualArmController(motion_mode=args.motion, simulation_mode=False)
+        elif args.arm == "G1_29":
+            from teleop.robot_control.robot_arm import G1_29_ArmController
             arm_ik = G1_29_ArmIK()
             arm_ctrl = G1_29_ArmController(motion_mode=args.motion, simulation_mode=args.sim)
         elif args.arm == "G1_23":
             arm_ik = G1_23_ArmIK()
+            from teleop.robot_control.robot_arm import G1_23_ArmController
             arm_ctrl = G1_23_ArmController(motion_mode=args.motion, simulation_mode=args.sim)
         elif args.arm == "H1_2":
             arm_ik = H1_2_ArmIK()
+            from teleop.robot_control.robot_arm import H1_2_ArmController
             arm_ctrl = H1_2_ArmController(motion_mode=args.motion, simulation_mode=args.sim)
         elif args.arm == "H1":
             arm_ik = H1_ArmIK()
+            from teleop.robot_control.robot_arm import H1_ArmController
             arm_ctrl = H1_ArmController(simulation_mode=args.sim)
+        elif args.arm == "H2":
+            arm_ik = H2_ArmIK()
+            from teleop.robot_control.robot_arm import H2_ArmController
+            arm_ctrl = H2_ArmController(motion_mode=args.motion, simulation_mode=args.sim)
 
         # end-effector
-        if args.ee == "dex3":
-            from teleop.robot_control.robot_hand_unitree import Dex3_1_Controller
+        xr_motion_data_ready = Value('b', False, lock=True)        # [input] whether XR hand/controller motion data has arrived
+        if args.ee in ("dex3", "inspire_ftp", "inspire_dfx") and args.input_mode == "controller":
+            raise ValueError(f"{args.ee} does not support controller input mode.")
+        elif args.ee == "dex3":
+            if args.no_robot:
+                # Retargeting is identical; only the DDS publish/subscribe is dropped.
+                from teleop.robot_control.robot_hand_virtual import Dex3_1_VirtualController as Dex3_1_Controller
+            else:
+                from teleop.robot_control.robot_hand_unitree import Dex3_1_Controller
             left_hand_pos_array = Array('d', 75, lock = True)      # [input]
             right_hand_pos_array = Array('d', 75, lock = True)     # [input]
             dual_hand_data_lock = Lock()
             dual_hand_state_array = Array('d', 14, lock = False)   # [output] current left, right hand state(14) data.
             dual_hand_action_array = Array('d', 14, lock = False)  # [output] current left, right hand action(14) data.
             hand_ctrl = Dex3_1_Controller(left_hand_pos_array, right_hand_pos_array, dual_hand_data_lock, 
-                                          dual_hand_state_array, dual_hand_action_array, simulation_mode=args.sim)
+                                          dual_hand_state_array, dual_hand_action_array, simulation_mode=args.sim, xr_motion_data_ready_in=xr_motion_data_ready)
         elif args.ee == "dex1":
             from teleop.robot_control.robot_hand_unitree import Dex1_1_Gripper_Controller
             left_gripper_value = Value('d', 0.0, lock=True)        # [input]
@@ -175,7 +221,7 @@ if __name__ == '__main__':
             dual_gripper_state_array = Array('d', 2, lock=False)   # current left, right gripper state(2) data.
             dual_gripper_action_array = Array('d', 2, lock=False)  # current left, right gripper action(2) data.
             gripper_ctrl = Dex1_1_Gripper_Controller(left_gripper_value, right_gripper_value, dual_gripper_data_lock, 
-                                                     dual_gripper_state_array, dual_gripper_action_array, simulation_mode=args.sim)
+                                                     dual_gripper_state_array, dual_gripper_action_array, simulation_mode=args.sim, xr_motion_data_ready_in=xr_motion_data_ready)
         elif args.ee == "inspire_dfx":
             from teleop.robot_control.robot_hand_inspire import Inspire_Controller_DFX
             left_hand_pos_array = Array('d', 75, lock = True)      # [input]
@@ -183,7 +229,7 @@ if __name__ == '__main__':
             dual_hand_data_lock = Lock()
             dual_hand_state_array = Array('d', 12, lock = False)   # [output] current left, right hand state(12) data.
             dual_hand_action_array = Array('d', 12, lock = False)  # [output] current left, right hand action(12) data.
-            hand_ctrl = Inspire_Controller_DFX(left_hand_pos_array, right_hand_pos_array, dual_hand_data_lock, dual_hand_state_array, dual_hand_action_array, simulation_mode=args.sim)
+            hand_ctrl = Inspire_Controller_DFX(left_hand_pos_array, right_hand_pos_array, dual_hand_data_lock, dual_hand_state_array, dual_hand_action_array, simulation_mode=args.sim, xr_motion_data_ready_in=xr_motion_data_ready)
         elif args.ee == "inspire_ftp":
             from teleop.robot_control.robot_hand_inspire import Inspire_Controller_FTP
             left_hand_pos_array = Array('d', 75, lock = True)      # [input]
@@ -191,16 +237,27 @@ if __name__ == '__main__':
             dual_hand_data_lock = Lock()
             dual_hand_state_array = Array('d', 12, lock = False)   # [output] current left, right hand state(12) data.
             dual_hand_action_array = Array('d', 12, lock = False)  # [output] current left, right hand action(12) data.
-            hand_ctrl = Inspire_Controller_FTP(left_hand_pos_array, right_hand_pos_array, dual_hand_data_lock, dual_hand_state_array, dual_hand_action_array, simulation_mode=args.sim)
-        elif args.ee == "brainco":
-            from teleop.robot_control.robot_hand_brainco import Brainco_Controller
+            hand_ctrl = Inspire_Controller_FTP(left_hand_pos_array, right_hand_pos_array, dual_hand_data_lock, dual_hand_state_array, dual_hand_action_array, simulation_mode=args.sim, xr_motion_data_ready_in=xr_motion_data_ready)
+        elif args.ee == "brainco" and args.input_mode == "hand":
+            from teleop.robot_control.robot_hand_brainco import Brainco_Controller_hand
             left_hand_pos_array = Array('d', 75, lock = True)      # [input]
             right_hand_pos_array = Array('d', 75, lock = True)     # [input]
             dual_hand_data_lock = Lock()
             dual_hand_state_array = Array('d', 12, lock = False)   # [output] current left, right hand state(12) data.
             dual_hand_action_array = Array('d', 12, lock = False)  # [output] current left, right hand action(12) data.
-            hand_ctrl = Brainco_Controller(left_hand_pos_array, right_hand_pos_array, dual_hand_data_lock, 
-                                           dual_hand_state_array, dual_hand_action_array, simulation_mode=args.sim)
+            hand_ctrl = Brainco_Controller_hand(left_hand_pos_array, right_hand_pos_array, dual_hand_data_lock, 
+                                                dual_hand_state_array, dual_hand_action_array, simulation_mode=args.sim, xr_motion_data_ready_in=xr_motion_data_ready)
+        elif args.ee == "brainco" and args.input_mode == "controller":
+            from teleop.robot_control.robot_hand_brainco import Brainco_Controller_ctrl
+            left_gripper_trigger_in = Value('d', 10.0, lock=True)  # [input]
+            left_gripper_squeeze_in = Value('d', 0.0, lock=True)   # [input]
+            right_gripper_trigger_in = Value('d', 10.0, lock=True) # [input]
+            right_gripper_squeeze_in = Value('d', 0.0, lock=True)  # [input]
+            dual_hand_data_lock = Lock()
+            dual_hand_state_array = Array('d', 12, lock = False)   # [output] current left, right hand state(12) data.
+            dual_hand_action_array = Array('d', 12, lock = False)  # [output] current left, right hand action(12) data.
+            hand_ctrl = Brainco_Controller_ctrl(left_gripper_trigger_in, left_gripper_squeeze_in, right_gripper_trigger_in, right_gripper_squeeze_in,
+                                                dual_hand_data_lock, dual_hand_state_array, dual_hand_action_array, simulation_mode=args.sim, xr_motion_data_ready_in=xr_motion_data_ready)
         else:
             pass
         
@@ -250,27 +307,33 @@ if __name__ == '__main__':
         READY = True                  # now ready to (1) enter START state
         while not START and not STOP: # wait for start or stop signal.
             time.sleep(0.033)
-            if camera_config['head_camera']['enable_zmq'] and xr_need_local_img:
-                head_img, _ = img_client.get_head_frame()
-                tv_wrapper.render_to_xr(head_img)
+            if camera_config['camera']['head_camera']['enable_zmq'] and xr_need_local_img:
+                head_img = img_client.get_head_frame()
+                if head_img.bgr is not None:
+                    tv_wrapper.render_to_xr(head_img.bgr)
 
         logger_mp.info("---------------------🚀start Tracking🚀-------------------------")
         arm_ctrl.speed_gradual_max()
+
+        head_img = None
+        left_wrist_img = None
+        right_wrist_img = None
+
         # main loop. robot start to follow VR user's motion
         while not STOP:
             start_time = time.time()
             # get image
-            if camera_config['head_camera']['enable_zmq']:
+            if camera_config['camera']['head_camera']['enable_zmq']:
                 if args.record or xr_need_local_img:
-                    head_img, head_img_fps = img_client.get_head_frame()
-                if xr_need_local_img:
-                    tv_wrapper.render_to_xr(head_img)
-            if camera_config['left_wrist_camera']['enable_zmq']:
+                    head_img = img_client.get_head_frame()
+                if xr_need_local_img and head_img.bgr is not None:
+                    tv_wrapper.render_to_xr(head_img.bgr)
+            if camera_config['camera']['left_wrist_camera']['enable_zmq']:
                 if args.record:
-                    left_wrist_img, _ = img_client.get_left_wrist_frame()
-            if camera_config['right_wrist_camera']['enable_zmq']:
+                    left_wrist_img = img_client.get_left_wrist_frame()
+            if camera_config['camera']['right_wrist_camera']['enable_zmq']:
                 if args.record:
-                    right_wrist_img, _ = img_client.get_right_wrist_frame()
+                    right_wrist_img = img_client.get_right_wrist_frame()
 
             # record mode
             if args.record and RECORD_TOGGLE:
@@ -288,11 +351,20 @@ if __name__ == '__main__':
 
             # get xr's tele data
             tele_data = tv_wrapper.get_tele_data()
-            if (args.ee == "dex3" or args.ee == "inspire_dfx" or args.ee == "inspire_ftp" or args.ee == "brainco") and args.input_mode == "hand":
+            if args.ee in ("dex3", "inspire_ftp", "inspire_dfx", "brainco")  and args.input_mode == "hand":
                 with left_hand_pos_array.get_lock():
                     left_hand_pos_array[:] = tele_data.left_hand_pos.flatten()
                 with right_hand_pos_array.get_lock():
                     right_hand_pos_array[:] = tele_data.right_hand_pos.flatten()
+            elif args.ee == "brainco" and args.input_mode == "controller":
+                with left_gripper_trigger_in.get_lock():
+                    left_gripper_trigger_in.value = tele_data.left_ctrl_triggerValue
+                with left_gripper_squeeze_in.get_lock():
+                    left_gripper_squeeze_in.value = tele_data.left_ctrl_squeezeValue
+                with right_gripper_trigger_in.get_lock():
+                    right_gripper_trigger_in.value = tele_data.right_ctrl_triggerValue
+                with right_gripper_squeeze_in.get_lock():
+                    right_gripper_squeeze_in.value = tele_data.right_ctrl_squeezeValue
             elif args.ee == "dex1" and args.input_mode == "controller":
                 with left_gripper_value.get_lock():
                     left_gripper_value.value = tele_data.left_ctrl_triggerValue
@@ -305,6 +377,8 @@ if __name__ == '__main__':
                     right_gripper_value.value = tele_data.right_hand_pinchValue
             else:
                 pass
+            with xr_motion_data_ready.get_lock():
+                xr_motion_data_ready.value = tele_data.motion_data_ready
             
             # high level control
             if args.input_mode == "controller" and args.motion:
@@ -326,6 +400,9 @@ if __name__ == '__main__':
 
             # solve ik using motor data and wrist pose, then use ik results to control arms.
             time_ik_start = time.time()
+            # Captured here, at the call, so the recorded targets are provably the same
+            # values the solver received -- not a re-read that could have advanced.
+            _wrist_targets = {"left": tele_data.left_wrist_pose, "right": tele_data.right_wrist_pose}
             sol_q, sol_tauff  = arm_ik.solve_ik(tele_data.left_wrist_pose, tele_data.right_wrist_pose, current_lr_arm_q, current_lr_arm_dq)
             time_ik_end = time.time()
             logger_mp.debug(f"ik:\t{round(time_ik_end - time_ik_start, 6)}")
@@ -369,6 +446,16 @@ if __name__ == '__main__':
                         right_hand_action = dual_hand_action_array[-6:]
                         current_body_state = []
                         current_body_action = []
+                elif (args.ee == "brainco" and args.input_mode == "controller"):
+                    with dual_hand_data_lock:
+                        left_ee_state = dual_hand_state_array[:6]
+                        right_ee_state = dual_hand_state_array[-6:]
+                        left_hand_action = dual_hand_action_array[:6]
+                        right_hand_action = dual_hand_action_array[-6:]
+                        current_body_state = arm_ctrl.get_current_motor_q().tolist()
+                        current_body_action = [-tele_data.left_ctrl_thumbstickValue[1]  * 0.3,
+                                               -tele_data.left_ctrl_thumbstickValue[0]  * 0.3,
+                                               -tele_data.right_ctrl_thumbstickValue[0] * 0.3]
                 else:
                     left_ee_state = []
                     right_ee_state = []
@@ -385,35 +472,35 @@ if __name__ == '__main__':
                 if RECORD_RUNNING:
                     colors = {}
                     depths = {}
-                    if camera_config['head_camera']['binocular']:
+                    if camera_config['camera']['head_camera']['binocular']:
                         if head_img is not None:
-                            colors[f"color_{0}"] = head_img[:, :camera_config['head_camera']['image_shape'][1]//2]
-                            colors[f"color_{1}"] = head_img[:, camera_config['head_camera']['image_shape'][1]//2:]
+                            colors[f"color_{0}"] = head_img.bgr[:, :camera_config['camera']['head_camera']['image_shape'][1]//2]
+                            colors[f"color_{1}"] = head_img.bgr[:, camera_config['camera']['head_camera']['image_shape'][1]//2:]
                         else:
                             logger_mp.warning("Head image is None!")
-                        if camera_config['left_wrist_camera']['enable_zmq']:
+                        if camera_config['camera']['left_wrist_camera']['enable_zmq']:
                             if left_wrist_img is not None:
-                                colors[f"color_{2}"] = left_wrist_img
+                                colors[f"color_{2}"] = left_wrist_img.bgr
                             else:
                                 logger_mp.warning("Left wrist image is None!")
-                        if camera_config['right_wrist_camera']['enable_zmq']:
+                        if camera_config['camera']['right_wrist_camera']['enable_zmq']:
                             if right_wrist_img is not None:
-                                colors[f"color_{3}"] = right_wrist_img
+                                colors[f"color_{3}"] = right_wrist_img.bgr
                             else:
                                 logger_mp.warning("Right wrist image is None!")
                     else:
                         if head_img is not None:
-                            colors[f"color_{0}"] = head_img
+                            colors[f"color_{0}"] = head_img.bgr
                         else:
                             logger_mp.warning("Head image is None!")
-                        if camera_config['left_wrist_camera']['enable_zmq']:
+                        if camera_config['camera']['left_wrist_camera']['enable_zmq']:
                             if left_wrist_img is not None:
-                                colors[f"color_{1}"] = left_wrist_img
+                                colors[f"color_{1}"] = left_wrist_img.bgr
                             else:
                                 logger_mp.warning("Left wrist image is None!")
-                        if camera_config['right_wrist_camera']['enable_zmq']:
+                        if camera_config['camera']['right_wrist_camera']['enable_zmq']:
                             if right_wrist_img is not None:
-                                colors[f"color_{2}"] = right_wrist_img
+                                colors[f"color_{2}"] = right_wrist_img.bgr
                             else:
                                 logger_mp.warning("Right wrist image is None!")
                     states = {
@@ -466,11 +553,31 @@ if __name__ == '__main__':
                             "qpos": current_body_action,
                         }, 
                     }
+                    # head_pose and timestamp are recorded for downstream offline replay.
+                    #
+                    # head_pose: televuer already computes this every frame, but it never
+                    # reached disk. It is required whenever the camera is mounted on the
+                    # HEADSET rather than on the robot, because televuer makes the wrist
+                    # targets head-relative in TRANSLATION ONLY (see tv_wrapper.py's
+                    # "Transfer from WORLD to HEAD coordinate") -- head rotation is never
+                    # applied. So the camera's position in the robot frame is constant but
+                    # its orientation is the operator's head rotation, per frame. Two
+                    # recordings with identical arm motion and completely different head
+                    # orientation produce byte-identical joint trajectories, so this cannot
+                    # be recovered afterwards.
+                    #
+                    # timestamp: `start_time` is this iteration's acquisition time, taken at
+                    # the top of the loop. The loop paces itself with a best-effort
+                    # time.sleep, so real intervals drift off the nominal --frequency.
                     if args.sim:
                         sim_state = sim_state_subscriber.read_data()            
-                        recorder.add_item(colors=colors, depths=depths, states=states, actions=actions, sim_state=sim_state)
+                        recorder.add_item(colors=colors, depths=depths, states=states, actions=actions, sim_state=sim_state,
+                                          head_pose=tele_data.head_pose, timestamp=start_time,
+                                          wrist_pose=_wrist_targets)
                     else:
-                        recorder.add_item(colors=colors, depths=depths, states=states, actions=actions)
+                        recorder.add_item(colors=colors, depths=depths, states=states, actions=actions,
+                                          head_pose=tele_data.head_pose, timestamp=start_time,
+                                          wrist_pose=_wrist_targets)
 
             current_time = time.time()
             time_elapsed = current_time - start_time
@@ -499,7 +606,8 @@ if __name__ == '__main__':
             logger_mp.error(f"Failed to stop keyboard listener or ipc server: {e}")
         
         try:
-            img_client.close()
+            if img_client is not None:
+                img_client.close()
         except Exception as e:
             logger_mp.error(f"Failed to close image client: {e}")
 

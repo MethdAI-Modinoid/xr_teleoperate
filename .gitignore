@@ -23,3 +23,22 @@ teleop/data/
 episode_0*
 .vscode/
 *.pkl
+# --- MethdAI fork additions ---
+# Self-signed TLS keypairs are generated per station by setup_station.sh. Never commit a
+# private key; *.pem above already covers these, listed explicitly for clarity.
+teleop/televuer/key.pem
+teleop/televuer/cert.pem
+teleop/teleimager/key.pem
+teleop/teleimager/cert.pem
+
+# Recorded episodes: large, and per-operator. `episode_0*` above catches most; this covers
+# the task directories the runbook uses.
+teleop/utils/data/
+
+# Pinocchio model cache, rebuilt on first run (~11 ms from URDF).
+g1_29_model_cache.pkl
+teleop/g1_29_model_cache.pkl
+
+# Local backups made while fixing the tracking bug.
+*.bak_before_tracking_fix
+*.upstream

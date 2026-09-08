@@ -69,31 +69,35 @@ The currently supported devices in this repository:
     <th align="center">⚪ Status</th>
   </tr>
   <tr>
-    <td align="center"><a href="https://www.unitree.com/cn/g1" target="_blank">G1 (29 DoF)</a></td>
+    <td align="center"><a href="https://www.unitree.com/g1" target="_blank">G1 (29 DoF)</a></td>
     <td align="center">✅ Complete</td>
   </tr>
   <tr>
-    <td align="center"><a href="https://www.unitree.com/cn/g1" target="_blank">G1 (23 DoF)</a></td>
+    <td align="center"><a href="https://www.unitree.com/g1" target="_blank">G1 (23 DoF)</a></td>
     <td align="center">✅ Complete</td>
   </tr>
   <tr>
-    <td align="center"><a href="https://www.unitree.com/cn/h1" target="_blank">H1 (4‑DoF arm)</a></td>
+    <td align="center"><a href="https://www.unitree.com/h1" target="_blank">H1 (4‑DoF arm)</a></td>
     <td align="center">✅ Complete</td>
   </tr>
   <tr>
-    <td align="center"><a href="https://www.unitree.com/cn/h1" target="_blank">H1_2 (7‑DoF arm)</a></td>
+    <td align="center"><a href="https://www.unitree.com/h1" target="_blank">H1_2 (7‑DoF arm)</a></td>
     <td align="center">✅ Complete</td>
   </tr>
   <tr>
-    <td align="center"><a href="https://www.unitree.com/cn/Dex1-1" target="_blank">Dex1‑1 gripper</a></td>
+    <td align="center"><a href="https://www.unitree.com/h2" target="_blank">H2 (7‑DoF arm)</a></td>
     <td align="center">✅ Complete</td>
   </tr>
   <tr>
-    <td align="center"><a href="https://www.unitree.com/cn/Dex3-1" target="_blank">Dex3‑1 dexterous hand</a></td>
+    <td align="center"><a href="https://www.unitree.com/Dex1-1" target="_blank">Dex1‑1 gripper</a></td>
     <td align="center">✅ Complete</td>
   </tr>
   <tr>
-    <td align="center"><a href="https://support.unitree.com/home/zh/G1_developer/inspire_dfx_dexterous_hand" target="_blank">Inspire dexterous hand</a></td>
+    <td align="center"><a href="https://www.unitree.com/Dex3-1" target="_blank">Dex3‑1 dexterous hand</a></td>
+    <td align="center">✅ Complete</td>
+  </tr>
+  <tr>
+    <td align="center"><a href="https://support.unitree.com/home/en/G1_developer/inspire_dfx_dexterous_hand" target="_blank">Inspire dexterous hand</a></td>
     <td align="center">✅ Complete</td>
   </tr>
   <tr>
@@ -220,7 +224,7 @@ build  cert.pem  key.pem  LICENSE  pyproject.toml  README.md  rootCA.key  rootCA
 
 | ⚙️ Parameter  |                        📜 Description                         |
 | :----------: | :----------------------------------------------------------: |
-|  `--motion`  | **Enable motion control mode** When enabled, the teleoperation program can run alongside the robot’s motion control program.In **hand tracking** mode, the [R3 controller](https://www.unitree.com/cn/R3) can be used to control normal robot walking; in **controller tracking** mode, joysticks can also control the robot’s movement. |
+|  `--motion`  | **Enable motion control mode** When enabled, the teleoperation program can run alongside the robot’s motion control program.In **hand tracking** mode, the [R3 controller](https://www.unitree.com/cn/R3) can be used to control normal robot walking; in **controller tracking** mode, joysticks can also control the robot’s movement.<br />Note: Only `Regular mode` (R1+X) is supported, `Running mode` (R2+A) is not supported. |
 | `--headless` | **Enable headless mode** For running the program on devices without a display, e.g., the Development Computing Unit (PC2). |
 |   `--sim`    | **Enable [simulation mode](https://github.com/unitreerobotics/unitree_sim_isaaclab)** |
 |   `--ipc`    | **Inter-process communication mode** Allows controlling the xr_teleoperate program’s state via IPC. Suitable for interaction with agent programs. |
@@ -306,8 +310,10 @@ Next steps:
 4. Open a browser (e.g. Safari or PICO Browser) and go to:  `https://192.168.123.2:8012/?ws=wss://192.168.123.2:8012`
 
    > **Note 1**: This IP must match your **Host** IP (check with `ifconfig`).
-   >
-   > **Note 2**: You may see a warning page. Click **Advanced**, then **Proceed to IP (unsafe)**.
+   > 
+   > **Note 2**: Use `https://vuer.ai?ws=wss://192.168.123.2:8012` for PICO if the websocket connection cannot be set.
+   > 
+   > **Note 3**: You may see a warning page. Click **Advanced**, then **Proceed to IP (unsafe)**.
 
    <p align="center">
      <a href="https://oss-global-cdn.unitree.com/static/cef18751ca6643b683bfbea35fed8e7c_1279x1002.png">
@@ -530,3 +536,15 @@ This code builds upon following open-source code-bases. Please visit the URLs to
 8. https://github.com/Dingry/BunnyVisionPro
 9. https://github.com/unitreerobotics/unitree_sdk2_python
 10. https://github.com/ARCLab-MIT/beavr-bot
+
+# 7. 📝 Citation
+
+```
+@misc{xr-teleoperate,
+  author       = {{Unitree Robotics}},
+  title        = {{XR-Teleoperate}: An Open-Source Teleoperation Framework and Data Collection Toolkit for Embodied Intelligence},
+  howpublished = {\url{https://github.com/unitreerobotics/xr_teleoperate}},
+  year         = {2024},
+  note         = {Accessed: 2026-02}
+}
+```

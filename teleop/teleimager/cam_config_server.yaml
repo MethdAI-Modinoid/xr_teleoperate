@@ -1,0 +1,82 @@
+# Recording-station camera config: ONE head-mounted RealSense, no wrist cameras.
+#
+# Upstream's default (kept at cam_config_server.yaml.upstream) describes the G1's own
+# head/wrist rig. See ../../../STATION_SETUP.md.
+#
+# Discover your camera's serial:   teleimager-server --cf --rs
+# Start the server:                teleimager-server --rs
+
+head_camera:
+  # ZMQ feeds the recorder (colors/ in the episode); WebRTC feeds the headset's display,
+  # so the operator can see what they are doing. Both come off the same frame, which is
+  # what keeps the recorded video frame-locked to the joint data.
+  enable_zmq: true
+  zmq_port: 55555
+  enable_webrtc: true
+  webrtc_port: 60001
+  webrtc_codec: h264
+
+  type: realsense
+
+  # MUST be false for a single RealSense. With binocular: true the record loop splits every
+  # frame down the middle and stores two half-images -- upstream's default, because the G1's
+  # head is a stereo pair. A single camera would silently record half frames.
+  binocular: false
+
+  # [height, width].
+  #
+  # THIS UNIT IS CURRENTLY ON USB 2.1 (480 Mbps), which hard-limits the colour modes.
+  # Measured on this exact link:
+  #     1920x1080 @  8 fps
+  #     1280x720  @ 15 fps
+  #     640x480   @ 30 fps      <- the only mode that keeps 1:1 with the 30 Hz record loop
+  #     424x240   @ 60 fps
+  # (848x480 is NOT offered at all on USB2 -- an earlier value here was invalid.)
+  #
+  # 640x480 is set below because the teleop loop runs at 30 Hz and anything slower means
+  # colors/ contains duplicated frames while the joint data advances -- breaking the 1:1
+  # frame-lock that makes episode<->video sync free.
+  #
+  # MOVE THE CAMERA TO A USB3 PORT before recording anything real. On USB3 the D435i does
+  # 1920x1080 @ 30, which is what the rest of the pipeline's calibration assumes (and
+  # 640x480 is 4:3, not the 16:9 the extrinsics work was done against). Then set:
+  #     image_shape: [1080, 1920]
+  image_shape: [480, 640]
+  fps: 30
+
+  # type: realsense resolves by serial_number ONLY. Fill this in from `--cf --rs` output.
+  video_id: "'/dev/video1"
+  serial_number: "344522071502"
+  physical_path: null
+
+# No wrist cameras on a headset-only station. Left disabled rather than deleted: ImageClient
+# validates that all three keys exist.
+# left_wrist_camera:
+#   enable_zmq: false
+#   zmq_port: 55556
+#   enable_webrtc: false
+#   webrtc_port: 60002
+#   webrtc_codec: h264
+#   type: opencv
+#   image_shape: [480, 640]
+#   binocular: false
+#   fps: 30
+#   video_id: null
+#   serial_number: null
+#   physical_path: null
+
+# right_wrist_camera:
+#   enable_zmq: false
+#   zmq_port: 55557
+#   enable_webrtc: false
+#   webrtc_port: 60003
+#   webrtc_codec: h264
+#   type: opencv
+#   image_shape: [480, 640]
+#   binocular: false
+#   fps: 30
+#   video_id: null
+#   serial_number: null
+#   physical_path: null
+
+# https://vuer.ai?ws=wss://192.168.123.153:8012
