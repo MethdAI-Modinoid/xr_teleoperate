@@ -1,0 +1,223 @@
+diff --git a/cam_config_server.yaml b/cam_config_server.yaml
+index 06c5628..b4d1446 100644
+--- a/cam_config_server.yaml
++++ b/cam_config_server.yaml
+@@ -21,7 +21,7 @@ head_camera:
+   #   - "opencv"    → opencv driver
+   #   - "realsense" → pyrealsense2 driver
+   #   - "uvc"       → pyuvc driver
+-  type: uvc
++  type: opencv
+ 
+   # Image Format
+   # image resolution: [height, width]
+diff --git a/src/teleimager/image_client.py b/src/teleimager/image_client.py
+index eba9350..552eb38 100644
+--- a/src/teleimager/image_client.py
++++ b/src/teleimager/image_client.py
+@@ -29,8 +29,53 @@ import numpy as np
+ import yaml
+ import os
+ import logging_mp
++import mmap
+ logger_mp = logging_mp.get_logger(__name__, level=logging_mp.INFO)
+ 
++def validate_cam_config(cam_config: Dict[str, Any]) -> None:
++    if cam_config is None:
++        raise RuntimeError("Camera config is None")
++
++    required_cameras = ["head_camera", "left_wrist_camera", "right_wrist_camera"]
++
++    for cam_name in required_cameras:
++        if cam_name not in cam_config:
++            raise KeyError(f"Missing '{cam_name}' in camera config")
++
++        cam = cam_config[cam_name]
++
++        if not isinstance(cam.get("enable_zmq", False), bool):
++            raise TypeError(f"{cam_name}.enable_zmq must be bool")
++
++        if cam.get("enable_zmq", False):
++            if "zmq_port" not in cam:
++                raise KeyError(f"{cam_name}.zmq_port missing while ZMQ enabled")
++
++            if not isinstance(cam["zmq_port"], int):
++                raise TypeError(f"{cam_name}.zmq_port must be int")
++
++        if "image_shape" in cam:
++            shape = cam["image_shape"]
++
++            if not isinstance(shape, (list, tuple)):
++                logger_mp.warning(
++                    f"{cam_name}.image_shape is not a list/tuple, got {type(shape)}"
++                )
++                continue
++
++            if len(shape) < 2:
++                raise ValueError(f"{cam_name}.image_shape must have at least H, W")
++
++            if not all(isinstance(x, int) and x > 0 for x in shape[:2]):
++                raise ValueError(f"{cam_name}.image_shape H and W must be positive ints")
++
++            if len(shape) != 3:
++                logger_mp.warning(
++                    f"{cam_name}.image_shape is {shape}, assuming last dim is channels"
++                )
++
++
++
+ # ========================================================
+ # Utility tools
+ # ========================================================
+@@ -571,7 +616,7 @@ class ZMQ_Requester:
+ # image client
+ # ========================================================
+ class ImageClient:
+-    def __init__(self, host="192.168.123.164", request_port=60000):
++    def __init__(self, host="127.0.0.1", request_port=60001):
+         """
+         Args:
+             server_address:   IP address of image host server
+@@ -585,35 +630,72 @@ class ImageClient:
+         self._requester  = ZMQ_Requester(self._host, self._request_port)
+         self._cam_config = self._requester.request()
+ 
++        validate_cam_config(self._cam_config)
++        logger_mp.info("[ImageClient] Camera config validated successfully")
++
++
+         if self._cam_config is None:
+             raise RuntimeError("Failed to get camera configuration.")
+         
+         if self._cam_config['head_camera']['enable_zmq']:
+             self._subscriber_manager.subscribe(self._host, self._cam_config['head_camera']['zmq_port'])
+ 
+-        if self._cam_config['left_wrist_camera']['enable_zmq']:
+-            self._subscriber_manager.subscribe(self._host, self._cam_config['left_wrist_camera']['zmq_port'])
++        # if self._cam_config['left_wrist_camera']['enable_zmq']:
++        #     self._subscriber_manager.subscribe(self._host, self._cam_config['left_wrist_camera']['zmq_port'])
+ 
+-        if self._cam_config['right_wrist_camera']['enable_zmq']:
+-            self._subscriber_manager.subscribe(self._host, self._cam_config['right_wrist_camera']['zmq_port'])
++        # if self._cam_config['right_wrist_camera']['enable_zmq']:
++        #     self._subscriber_manager.subscribe(self._host, self._cam_config['right_wrist_camera']['zmq_port'])
+ 
+         if not self._cam_config['head_camera']['enable_zmq'] and not self._cam_config['head_camera']['enable_webrtc']:
+             logger_mp.warning("[Image Client] NOTICE! Head camera is not enabled on both ZMQ and WebRTC.")
+ 
++    def _get_hw_from_config(self, cam_name):
++        shape = self._cam_config[cam_name]["image_shape"]
++        # shape is guaranteed [H, W, C] after validation
++        return shape[0], shape[1]
++    
++    def get_cam_config(self):
++        return self._cam_config
++
++    def _read_from_shm(self, filename, height, width):
++        try:
++            # Direct path to the Linux shared memory handle
++            path = f"/dev/shm/{filename}"
++            with open(path, "rb") as f:
++                # Map the file into memory
++                mm = mmap.mmap(f.fileno(), 0, prot=mmap.PROT_READ)
++                shm_size = mm.size()
++                expected_bytes = height * width * 3
++                # offset 128 is standard for Isaac Lab/Sim SHM headers
++                logger_mp.warning(
++                f"SHM {filename}: size={shm_size}, expected={expected_bytes}"
++            )
++                if shm_size < expected_bytes:
++                    return None, 0.0
++
++                raw = np.frombuffer(mm, dtype=np.uint8,offset=128, count=921728)
++                return raw.reshape((height, width, 3)).copy(), 30.0     # Return frame and dummy FPS
++        except Exception as e:
++            logger_mp.warning(f"Failed to read image from SHM {filename}: {e}")
++            return None, 0.0
++
+     # --------------------------------------------------------
+     # public api
+     # --------------------------------------------------------
+-    def get_cam_config(self):
+-        return self._cam_config
++    # def get_cam_config(self):
++    #     return self._cam_config
+ 
+     def get_head_frame(self):
+-        return self._subscriber_manager.subscribe(self._host, self._cam_config['head_camera']['zmq_port'])
++        h, w = self._get_hw_from_config("head_camera")
++        return self._read_from_shm("isaac_head_image_shm", h, w)
+     
+     def get_left_wrist_frame(self):
+-        return self._subscriber_manager.subscribe(self._host, self._cam_config['left_wrist_camera']['zmq_port'])
++        h, w = self._get_hw_from_config("left_wrist_camera")
++        return self._read_from_shm("isaac_left_image_shm",h,w)
+     
+     def get_right_wrist_frame(self):
+-        return self._subscriber_manager.subscribe(self._host, self._cam_config['right_wrist_camera']['zmq_port'])
++        h, w = self._get_hw_from_config("right_wrist_camera")
++        return self._read_from_shm("isaac_right_image_shm",h,w)
+         
+     def close(self):
+         self._subscriber_manager.close()
+@@ -623,7 +705,7 @@ def main():
+     # command line args
+     import argparse
+     parser = argparse.ArgumentParser()
+-    parser.add_argument('--host', type=str, default='192.168.123.164', help='IP address of image server')
++    parser.add_argument('--host', type=str, default='127.0.0.1', help='IP address of image server')
+     args = parser.parse_args()
+ 
+     # Example usage with three camera streams
+diff --git a/src/teleimager/image_server.py b/src/teleimager/image_server.py
+index 79fcaa9..197f514 100644
+--- a/src/teleimager/image_server.py
++++ b/src/teleimager/image_server.py
+@@ -416,7 +416,8 @@ class WebRTC_PublisherThread(threading.Thread):
+         self._pcs.discard(pc)
+         try:
+             await pc.close()
+-        except: pass
++        except:
++            pass
+ 
+     def wait_for_start(self, timeout=1.0):
+         return self._start_event.wait(timeout=timeout)
+@@ -1063,7 +1064,7 @@ class UVCCamera(BaseCamera):
+ 
+ class OpenCVCamera(BaseCamera):
+     def __init__(self, cam_topic, video_path, img_shape, fps, 
+-                 enable_zmq=True, zmq_port=55555, enable_webrtc=False, webrtc_port=66666, webrtc_codec=None):
++                 enable_zmq=True, zmq_port=55555, enable_webrtc=True, webrtc_port=66666, webrtc_codec=None):
+         super().__init__(cam_topic, img_shape, fps, enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec)
+         self._video_path = video_path
+ 
+@@ -1116,8 +1117,8 @@ class OpenCVCamera(BaseCamera):
+ 
+ class IsaacSimCamera(BaseCamera):
+     def __init__(self, cam_topic, img_shape, fps,
+-                 enable_zmq=True, zmq_port=55555, enable_webrtc=False, webrtc_port=66666, webrtc_codec=None,
+-                 image_source="head", binocular=False):
++                 enable_zmq=True, zmq_port=55555, enable_webrtc=True, webrtc_port=60001, webrtc_codec="h264",
++                 image_source="head", binocular=True):
+         """
+         IsaacSim camera that reads from shared memory.
+ 
+@@ -1200,7 +1201,7 @@ class IsaacSimCamera(BaseCamera):
+ # image server
+ # ========================================================
+ class ImageServer:
+-    def __init__(self, cam_config, realsense_enable=False, camera_finder_verbose=False, isaacsim_enable=False):
++    def __init__(self, cam_config, realsense_enable=False, camera_finder_verbose=False, isaacsim_enable=True):
+         self._cam_config = cam_config
+         self._realsense_enable = realsense_enable
+         self._isaacsim_enable = isaacsim_enable
+@@ -1216,7 +1217,7 @@ class ImageServer:
+         try:
+             # Load cameras from self.cam_config
+             for cam_topic, cam_cfg in self._cam_config.items():
+-                if not cam_cfg.get("enable_zmq", False) and not cam_cfg.get("enable_webrtc", False):
++                if not cam_cfg.get("enable_zmq", True) and not cam_cfg.get("enable_webrtc", True):
+                     continue
+ 
+                 enable_zmq = cam_cfg.get("enable_zmq", False)
